@@ -1,0 +1,548 @@
+//Include Servo Motor Control Library
+#include <Servo.h>
+
+//Define names to pins on Arduino
+
+  //X-Axis Limit Switch; used to determine X-axis position of motor.
+
+#define limitSwitch 13
+
+  //Limit Switch for Z-axis. Measures distance from base to paper; used to set the proper height for moving the Z-axis piston.
+
+#define zLimitSwitch 11
+
+  //Potentiometer input to adjust Z-axis height during a print.
+
+#define zPotent A5
+
+  //X-Axis Stepper Motor Pins, note that MS Pathways are not defined because hardwired HIGH off 5v power as desired. Wired to 
+
+#define xStp 5
+#define xDir 4
+
+  //Y-Axis Stepper Motor Pins, note that MS Pathways are not defined because hardwired HIGH off 5v power as desired.
+
+#define yStp 3
+#define yDir 2
+//ADDITIONAL MS PINS
+#define yMS0 8
+#define yMS1 7
+#define yMS2 6
+
+
+//Declare Servo Motor
+
+Servo servoMotor;
+Servo zLimitServoMotor;
+
+//Declare variables for functions
+
+   //Tracks Position of Motors, relative to start times. xStepperPosition initially set via xStepperReset. yStepperPosition set by physicial location on startup.
+
+int xStepperPosition;
+int yStepperPosition;
+
+  //Sets the delay, in microseconds, between pulses to Stepper Motors. 1000 is the minimum to keeping the movement clean. Determined experimentally. May depend on step size?
+
+int yStepperDelayTime = 600;
+int xStepperDelayTime = 700;
+
+  //Variables for setting the approptiate servoStates (UP/DOWN).
+   
+    //Original Values. servoUpState and servoLoadState are used in the very first function, servoLoad(), so they are set manually. These values are subsequently updated.
+
+int servoUpState = 40;
+int servoDownState = 55;
+int servoLoadState = 10;
+
+    //Values set by origZTouchPointSet(). Called at the beginning 
+
+int origZTouchPoint;  //Set by origZTouchPointSet()
+int origServoUpState;  //Set by origZTouchPointSet()
+int origServoDownState;  //Set by origZTouchPointSet()
+
+    //Values set by origZLimitSet(). Sets the initial value for the ZLimitPosition, which is later used to test change, and update height.
+
+int origZLimitPosition;
+
+    //Value for the potentiometer to adjust Z height on the fly
+    
+int origZPotent; //Notably this variable is different than the other "orig" in that it is updated throughout.
+
+    //Manual input of total number of steps available to X Axis and desired Bit Depth, followed by various things that occur because of this. dotBitDepth is an arbitrary choice of how man values of black to have.
+    
+int xSteps = 4420; 
+int dotBitDepth = 11;  
+int stepsPerDot = (dotBitDepth - 1) * 2;
+int xDots = (xSteps - (xSteps % stepsPerDot)) / stepsPerDot;
+int margin = (xSteps % stepsPerDot) - ((xSteps % stepsPerDot) % 2) / 2;
+
+  int inInt = '!';
+
+//__________________End of Declaring Variables______________________
+
+//Setup Function. Everything in this function is called just once, as compared to the main loop, that is called repetitively.
+
+void setup() {
+
+  //Open Serial Port
+  Serial.begin(9600);
+  
+  //Set Pin Functions
+  
+    //Limit Switch Setup
+  
+  pinMode(limitSwitch, INPUT);
+
+    //X-Axis Stepper Motor Pins
+  
+  pinMode(xStp, OUTPUT);
+  pinMode(xDir, OUTPUT);
+
+    //Y-Axis Stepper Motor Pins
+  
+  pinMode(yStp, OUTPUT);
+  pinMode(yDir, OUTPUT);
+  
+  //Servo Motor Setup and function to load the piston.
+  
+  servoMotor.attach(12);
+  servoLoad();
+  
+  //Z-Axis Distance Set, as well as the variables used to adjust it later.
+  
+  zLimitServoMotor.attach(10);
+  zLimitServoMotor.write(0);
+  delay(500);
+  //origZTouchPointSet();
+  //origZLimitSet();
+  //origZPotent = analogRead(zPotent);
+  
+  //Set Default State for Stepper Pins. At the moment, only sets Stp to LOW so can initiate step.
+  xStepperPinReset();
+  yStepperPinReset();
+    
+  //Pull X-Axis Stepper to Home Position
+  yStepForward(50);
+  yStepBackward(50);
+  yStepperPosition = 0;
+  xStepForward(100);
+  xStepBackward(100);
+  delay(100);
+  xStepperReset();
+  delay(100);
+  //Serial.print('!');
+
+
+
+}
+
+//___________________________End of Setup Loop__________________
+
+//Main Loop that actually executes while MicroController is powered.
+
+void loop() {
+
+  
+  switch(secureReadInt()){
+    case 4: {
+        int xDot = secureReadInt();
+        int yDot = secureReadInt();
+        int depth = secureReadInt();
+        drawDot(xDot,yDot,depth);
+        break;
+    }  
+  }
+}
+
+//______________________End of Main Loop________________________
+
+//Define Functions Used in Main Loop
+
+  //STARTUP FUCTIONS
+  
+    //Resets Stepper Motor Pins so they can be triggered in movement calls. Ensures they are in proper default state.
+
+void xStepperPinReset() {
+  digitalWrite(xStp, LOW);
+}
+  
+void yStepperPinReset() {
+  digitalWrite(yStp, LOW);
+}
+
+    //Moves X-Axis to home position and sets tracker value.
+    
+void xStepperReset() {
+  xStepForward(10);
+  while(digitalRead(limitSwitch)) {
+    xStepBackward(1);
+    delay(1);
+  }
+  xStepperPosition = 0;
+}
+
+    //Startup Function allowing loading of the printer piston.
+    
+void servoLoad() {
+  while(digitalRead(limitSwitch)){
+    servoMotor.write(servoLoadState);
+  }
+  servoMotor.write(servoUpState);
+}
+
+    //Z Axis Functions; used to determine appropriate values for servoHeights
+
+      //Tests the height from the base to the paper. Does it three times; if the measurements are different it does it again. This is called originally and sets the "original value".
+
+void origZLimitSet() {
+  int zLimitPositionTest1 = 1;
+  int zLimitPositionTest2 = 2;
+  int zLimitPositionTest3 = 3;
+  while ( (zLimitPositionTest1 != zLimitPositionTest2) || (zLimitPositionTest2 != zLimitPositionTest3) ) {
+    zLimitPositionTest1 = 0;
+    zLimitPositionTest2 = 0;
+    zLimitPositionTest3 = 0;
+    //Test 1
+    zLimitServoMotor.write(zLimitPositionTest1);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest1 = zLimitPositionTest1 + 1;
+      zLimitServoMotor.write(zLimitPositionTest1);
+      delay(50);
+    }
+    //Test 2
+    zLimitServoMotor.write(zLimitPositionTest2);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest2 = zLimitPositionTest2 + 1;
+      zLimitServoMotor.write(zLimitPositionTest2);
+      delay(50);
+    }
+    //Test 3
+    zLimitServoMotor.write(zLimitPositionTest3);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest3 = zLimitPositionTest3 + 1;
+      zLimitServoMotor.write(zLimitPositionTest3);
+      delay(50);
+    }
+    delay(50);
+  }
+  zLimitServoMotor.write(0);
+  origZLimitPosition = zLimitPositionTest1;
+}
+
+      //Nearly identical to the above, at least in the measuring. However, this function is called during the print and adjusts the servoStates.
+
+void zLimitSet() {
+  int zLimitPosition;
+  int zLimitPositionTest1 = 0;
+  int zLimitPositionTest2 = 1;
+  int zLimitPositionTest3 = 2;
+  while ( (zLimitPositionTest1 != zLimitPositionTest2) || (zLimitPositionTest2 != zLimitPositionTest3) ) {
+    zLimitPositionTest1 = 0;
+    zLimitPositionTest2 = 0;
+    zLimitPositionTest3 = 0;
+    //Test 1
+    zLimitServoMotor.write(zLimitPositionTest1);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest1 = zLimitPositionTest1 + 1;
+      zLimitServoMotor.write(zLimitPositionTest1);
+      delay(50);
+    }
+    //Test 2
+    zLimitServoMotor.write(zLimitPositionTest2);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest2 = zLimitPositionTest2 + 1;
+      zLimitServoMotor.write(zLimitPositionTest2);
+      delay(50);
+    }
+    //Test 3
+    zLimitServoMotor.write(zLimitPositionTest3);
+    delay(50);
+    while(digitalRead(zLimitSwitch)){
+      zLimitPositionTest3 = zLimitPositionTest3 + 1;
+      zLimitServoMotor.write(zLimitPositionTest3);
+      delay(50);
+    }
+    delay(50);
+  }  
+  zLimitServoMotor.write(0);
+  zLimitPosition = zLimitPositionTest1;
+  servoUpState = origServoUpState + (3 * (origZLimitPosition - zLimitPosition));
+  servoDownState = origServoDownState + (3 * (origZLimitPosition - zLimitPosition));
+}
+
+      //This sets the pen height at the beginning. It also sets the servoStates at the beginning.
+
+void origZTouchPointSet() {
+  int tempServoState = servoUpState;
+  while(digitalRead(limitSwitch)) {
+    servoMotor.write(tempServoState);
+    delay(200);
+    tempServoState = tempServoState + 1;
+  }
+  origZTouchPoint = tempServoState;  
+  origServoUpState = origZTouchPoint - 7;
+  origServoDownState = origZTouchPoint + 7;
+  servoUpState = origServoUpState;
+  servoDownState = origServoDownState;  
+  servoMotor.write(servoUpState);
+}
+
+      //Run throughout the print and checks the potentiometer and, if adjusted, will change the servoState heights. Allows "on-the-fly" adjustment. Updates the origZPotent. 
+
+void checkZPotent() {
+  int tempZPotent = analogRead(zPotent);
+  servoUpState = servoUpState + ( (origZPotent - tempZPotent) / 50 );
+  servoDownState = servoDownState + ( (origZPotent - tempZPotent) / 50);
+  origZPotent = tempZPotent;
+}
+
+  //BASIC FUNCTIONS THAT ACTUALLY MOVE THE STEPPER MOTORS. FOUR FUNCTIONS, X AND Y AXIS AND FORWARD AND BACKWARD MOTION FOR EACH.
+
+void xStepForward(int y) {
+  digitalWrite(xDir,HIGH);
+  for(int x = 0; x < y; x++) {
+    digitalWrite(xStp,HIGH);
+    delayMicroseconds(xStepperDelayTime);
+    digitalWrite(xStp,LOW);
+    delayMicroseconds(xStepperDelayTime);
+    xStepperPosition = xStepperPosition + 1;
+  }
+}
+
+void xStepBackward(int y) {
+  digitalWrite(xDir,LOW);
+  for(int x = 0; x < y; x++) {
+    digitalWrite(xStp,HIGH);
+    delayMicroseconds(xStepperDelayTime);
+    digitalWrite(xStp,LOW);
+    delayMicroseconds(xStepperDelayTime);
+    xStepperPosition = xStepperPosition - 1;
+  }
+}
+
+void yStepForward(int y) {
+  digitalWrite(yDir,LOW);
+  for(int x = 0; x < y; x++) {
+    digitalWrite(yStp,HIGH);
+    delayMicroseconds(yStepperDelayTime);
+    digitalWrite(yStp,LOW);
+    delayMicroseconds(yStepperDelayTime);
+    yStepperPosition = yStepperPosition + 1;
+  }
+}
+
+void yStepBackward(int y) {
+  digitalWrite(yDir, HIGH);
+  for(int x = 0; x < y; x++) {
+    digitalWrite(yStp,HIGH);
+    delayMicroseconds(yStepperDelayTime);
+    digitalWrite(yStp,LOW);
+    delayMicroseconds(yStepperDelayTime);
+    yStepperPosition = yStepperPosition - 1;
+  }
+}
+
+  //DERIVATIVE MOVEMENT FUNCTIONS. DRAW ON BASIC MOVEMENT FUNCTIONS FOR ADDITIONAL FUNCTIONALITIES.
+
+    //xSet() and ySet() simply move to a given position, in terms of step#. xSet() has built in limitations so it won't run if called with an X value outside of the steps.
+
+void xSet(int x) {
+  int reqDelta = x - xStepperPosition;
+  if (x <= xSteps) {
+    if (reqDelta >= 0) {
+      xStepForward(abs(reqDelta));
+    }
+    else {
+      xStepBackward(abs(reqDelta));
+    }
+  }
+}
+
+void ySet(int y) {
+  int reqDelta = y - yStepperPosition;
+  if (reqDelta >= 0) {
+    yStepForward(abs(reqDelta));
+  }
+  else {
+    yStepBackward(abs(reqDelta));
+  }
+}
+
+    //New Function that moves X and Y axis simultaneously. Saves time. Has a similar safety mechanism to xSet().
+
+void xySet(int x, int y) {
+  if (x <= xSteps) {
+    int xReqDelta = x - xStepperPosition;
+    int yReqDelta = y - yStepperPosition;
+    //Set the appropriate direction for the stepper motors.
+    if (xReqDelta >= 0) {
+      digitalWrite(xDir,HIGH);
+    }
+    else {
+      digitalWrite(xDir,LOW);
+    }
+    if (yReqDelta >= 0) {
+      digitalWrite(yDir,HIGH);
+    }
+    else {
+      digitalWrite(yDir,LOW);
+    }
+    //Remove the directional information.
+    xReqDelta = abs(xReqDelta);
+    yReqDelta = abs(yReqDelta);
+    //Movement Code
+    if (xReqDelta >= yReqDelta) {
+      for(int i = 0; i < xReqDelta;i++) {
+        digitalWrite(xStp,HIGH);
+        xStepperPosition = xStepperPosition +1;
+        if (i < yReqDelta){
+          digitalWrite(yStp,HIGH);
+          yStepperPosition = yStepperPosition +1;
+        }
+        delayMicroseconds(500);
+        digitalWrite(xStp,LOW);
+        digitalWrite(yStp,LOW);
+        delayMicroseconds(500);
+      }
+    }
+    else {
+      for(int j = 0; j < yReqDelta;j++) {
+      digitalWrite(yStp,HIGH);
+      yStepperPosition = yStepperPosition +1;
+      if (j < xReqDelta){
+        digitalWrite(xStp,HIGH);
+        xStepperPosition = xStepperPosition +1;
+      }
+      delayMicroseconds(500);
+      digitalWrite(xStp,LOW);
+      digitalWrite(yStp,LOW);
+      delayMicroseconds(500);
+      }
+    }
+  }
+}
+
+    //Draws boxes to specific bit depth, 0 equals white. Takes X and Y coordinates in the form of "dots", which are just the effective pixel size of the printer; as set in initial values.
+
+void drawDot(int xDot, int yDot, int depth) { 
+  //Every once in while check the zLimit height
+  //if (yDot%40 == 0 && xDot == 111) {
+  //  zLimitSet();
+  //}
+  //Error check for depth number
+  if (depth > (dotBitDepth - 1)) {
+    depth = (dotBitDepth - 1);
+  }
+  //Check the on-the-fly height adjustment
+  //checkZPotent();
+  //Movement Code
+  int xDotStartingPosition = margin + 1 + (stepsPerDot * (xDot - 1));
+  int yDotStartingPosition = (stepsPerDot * (yDot - 1));
+  int xDotCenter = xDotStartingPosition + roundDown((stepsPerDot - 1) / 2);
+  xSet(xDotCenter);
+  int yDotCenter = yDotStartingPosition + roundDown((stepsPerDot - 1) / 2);
+  ySet(yDotCenter);
+  for (int x = 2; x <= depth;) {
+    servoMotor.write(servoDownState);
+    //delay(60);
+    xStepForward((2 * x) - 2);
+    delayMicroseconds(2500 + (x * 200));
+    yStepForward((2 * x) - 2);
+    delayMicroseconds(2500 + (x * 200));
+    xStepBackward((2 * x) - 2);
+    delayMicroseconds(2500 + (x * 200));
+    yStepBackward((2 * x) - 2);
+    delayMicroseconds(2500 + (x * 200));
+    //Skips this step on the last iteration because unnecessary
+    if (x < depth) {
+      xStepBackward(1);
+      //delay(15);
+      yStepBackward(1);
+      delay(2);
+    }
+    //Code to speed up by lighten dark pixels. Skips various cocentric squares by skipping X.
+    if (x <= 3) {
+      x++;
+    }
+    else {
+      x = x + 2;
+    }
+  }
+  //Only lifts up the pen between Dot draws
+  //servoMotor.write(servoUpState);
+  //delay(35);    
+}
+
+  //SERIAL FUNCTION
+
+int secureReadInt() {
+  Serial.write('!');
+  while (Serial.available() <= 0) {
+    delayMicroseconds(1);
+  }
+  int onesDigit;
+  int tensDigit;
+  int hundredsDigit;
+  int digitCheck;
+  bool digitCheckTrue = false;
+  while (digitCheckTrue != true) {
+    switch (Serial.read() - '0') {
+      case 1:
+        while (Serial.available() <= 1) {
+          delayMicroseconds(1);
+        }
+        onesDigit = Serial.read() - '0';
+        digitCheck = Serial.read() - '0';
+        if (onesDigit%3 == digitCheck) {
+          Serial.write('$');
+          digitCheckTrue = true;
+          return(onesDigit);
+        }
+        break;
+      case 2:
+        while (Serial.available() <= 2) {
+          delayMicroseconds(1);
+        }
+        onesDigit = Serial.read() - '0';
+        tensDigit = Serial.read() - '0';
+        digitCheck = Serial.read() - '0';
+        if ((onesDigit+tensDigit)%3 == digitCheck) {
+          Serial.write('$');
+          digitCheckTrue = true;
+          return((tensDigit*10)+onesDigit);
+        }
+        break;
+      case 3:
+        while (Serial.available() <= 3) {
+          delayMicroseconds(1);
+        }
+        onesDigit = Serial.read() - '0';
+        tensDigit = Serial.read() - '0';
+        hundredsDigit = Serial.read() - '0';
+        digitCheck = Serial.read() - '0';
+        if ((onesDigit+tensDigit+hundredsDigit)%3 == digitCheck) {
+          Serial.write('$');
+          digitCheckTrue = true;
+          return((hundredsDigit*100)+(tensDigit*10)+onesDigit);
+        }    
+        break;
+    }
+    Serial.write('!');
+    Serial.write('!');
+    delay(5);
+  }
+}
+
+
+  //ACCESSORY FUNCTIONS
+
+int roundDown(int x) {
+  return x - (x % 1);
+}
+
